@@ -1,0 +1,38 @@
+/**
+ * Simple Serial Test - Verify ESP32 serial communication
+ * This minimal sketch just blinks an LED and prints to serial
+ */
+
+#include <Arduino.h>
+
+void setup() {
+    // Initialize serial FIRST
+    Serial.begin(115200);
+    delay(1000);  // Give serial time to initialize
+
+    Serial.println("\n\n");
+    Serial.println("======================================");
+    Serial.println("  ESP32-S3 SERIAL TEST");
+    Serial.println("======================================");
+    Serial.println("If you can see this, serial works!");
+    Serial.println("======================================\n");
+
+    // Built-in LED (usually GPIO 2 or GPIO 48 on ESP32-S3)
+    pinMode(48, OUTPUT);  // Try GPIO 48 first
+    pinMode(2, OUTPUT);   // Fallback to GPIO 2
+}
+
+void loop() {
+    static int count = 0;
+
+    Serial.printf("Loop iteration: %d (uptime: %lu seconds)\n", count++, millis() / 1000);
+
+    // Blink both possible LED pins
+    digitalWrite(48, HIGH);
+    digitalWrite(2, HIGH);
+    delay(500);
+
+    digitalWrite(48, LOW);
+    digitalWrite(2, LOW);
+    delay(500);
+}

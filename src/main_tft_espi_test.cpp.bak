@@ -1,0 +1,160 @@
+/**
+ * TFT_eSPI WITH MANUAL INITIALIZATION
+ * Uses exact initialization sequence from working bare-bones test,
+ * then uses TFT_eSPI for drawing functions
+ */
+
+#include <Arduino.h>
+#include <TFT_eSPI.h>
+#include <SPI.h>
+
+#define TFT_CS   15
+#define TFT_DC   2
+#define TFT_RST  4
+#define TFT_MOSI 11
+#define TFT_MISO 19
+#define TFT_SCLK 18
+#define TFT_BL   21
+
+TFT_eSPI tft = TFT_eSPI();
+SPIClass *tftSpi = nullptr;
+
+void writeCommand(uint8_t cmd) {
+    digitalWrite(TFT_DC, LOW);
+    digitalWrite(TFT_CS, LOW);
+    tftSpi->transfer(cmd);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void writeData(uint8_t data) {
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    tftSpi->transfer(data);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void manualInit() {
+    Serial.println("\n→ MANUAL INITIALIZATION (bypassing tft.init())");
+
+    // Setup pins
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(TFT_DC, OUTPUT);
+    pinMode(TFT_RST, OUTPUT);
+    pinMode(TFT_BL, OUTPUT);
+
+    digitalWrite(TFT_CS, HIGH);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_BL, HIGH);  // Backlight ON
+
+    Serial.println("  ✓ Pins configured");
+
+    // Initialize SPI (same as working test)
+    tftSpi = new SPIClass(HSPI);
+    tftSpi->begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TFT_CS);
+    tftSpi->setFrequency(4000000);  // 4MHz
+    tftSpi->setDataMode(SPI_MODE0);
+    tftSpi->setBitOrder(MSBFIRST);
+
+    Serial.println("  ✓ SPI initialized at 4MHz");
+
+    // Hardware reset (exact timing from working test)
+    Serial.println("  → Hardware reset...");
+    digitalWrite(TFT_RST, HIGH);
+    delay(20);
+    digitalWrite(TFT_RST, LOW);
+    delay(100);
+    digitalWrite(TFT_RST, HIGH);
+    delay(300);
+
+    // ILI9341 initialization sequence (exact from working test)
+    Serial.println("  → ILI9341 initialization...");
+
+    writeCommand(0x01);  // Software reset
+    delay(200);
+
+    writeCommand(0x28);  // Display OFF
+    delay(20);
+
+    writeCommand(0x11);  // Sleep OUT
+    delay(150);
+
+    writeCommand(0x3A);  // Pixel format
+    writeData(0x55);     // 16-bit/pixel
+    delay(10);
+
+    writeCommand(0x36);  // Memory access control
+    writeData(0x48);     // MX, BGR
+    delay(10);
+
+    writeCommand(0x29);  // Display ON
+    delay(50);
+
+    Serial.println("  ✓ Display initialized!\n");
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+
+    Serial.println("\n╔══════════════════════════════════╗");
+    Serial.println("║  TFT_eSPI + MANUAL INIT TEST    ║");
+    Serial.println("╚══════════════════════════════════╝");
+
+    // Use manual initialization instead of tft.init()
+    manualInit();
+
+    // Now set up TFT_eSPI to use the already-initialized display
+    // We skip tft.init() and just configure the object
+    Serial.println("→ Configuring TFT_eSPI object...");
+    tft.setRotation(1);  // Landscape (320x240)
+
+    Serial.println("→ Drawing test pattern with TFT_eSPI...\n");
+
+    // Test TFT_eSPI drawing functions
+    tft.fillScreen(TFT_BLACK);
+    delay(100);
+
+    tft.fillRect(0, 0, 80, 240, TFT_RED);
+    Serial.println("  Red stripe");
+    delay(200);
+
+    tft.fillRect(80, 0, 80, 240, TFT_GREEN);
+    Serial.println("  Green stripe");
+    delay(200);
+
+    tft.fillRect(160, 0, 80, 240, TFT_BLUE);
+    Serial.println("  Blue stripe");
+    delay(200);
+
+    tft.fillRect(240, 0, 80, 240, TFT_YELLOW);
+    Serial.println("  Yellow stripe");
+    delay(200);
+
+    // Test text rendering
+    Serial.println("\n→ Testing text rendering...");
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 10);
+    tft.println("TFT_eSPI Works!");
+    tft.setCursor(10, 40);
+    tft.setTextColor(TFT_YELLOW);
+    tft.println("Manual Init");
+    tft.setCursor(10, 70);
+    tft.setTextColor(TFT_GREEN);
+    tft.println("Success!");
+
+    Serial.println("✓ Test complete!");
+    Serial.println("\n╔══════════════════════════════════╗");
+    Serial.println("║  If you see colored stripes and ║");
+    Serial.println("║  text, TFT_eSPI is working!     ║");
+    Serial.println("╚══════════════════════════════════╝\n");
+}
+
+void loop() {
+    static unsigned long lastBlink = 0;
+    if (millis() - lastBlink > 2000) {
+        Serial.println("Heartbeat - display active");
+        lastBlink = millis();
+    }
+}

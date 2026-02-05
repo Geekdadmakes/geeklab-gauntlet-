@@ -1,0 +1,174 @@
+/**
+ * BARE BONES DISPLAY TEST
+ * Manual SPI initialization for ILI9341
+ * This bypasses TFT_eSPI library to test direct communication
+ */
+
+#include <Arduino.h>
+#include <SPI.h>
+
+#define TFT_CS   15
+#define TFT_DC   2
+#define TFT_RST  4
+#define TFT_MOSI 11
+#define TFT_MISO 19
+#define TFT_SCLK 18
+#define TFT_BL   21
+
+SPIClass *tftSpi = nullptr;
+
+void writeCommand(uint8_t cmd) {
+    digitalWrite(TFT_DC, LOW);
+    digitalWrite(TFT_CS, LOW);
+    tftSpi->transfer(cmd);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void writeData(uint8_t data) {
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    tftSpi->transfer(data);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void writeData16(uint16_t data) {
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    tftSpi->transfer(data >> 8);
+    tftSpi->transfer(data & 0xFF);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+
+    Serial.println("\n\n╔═══════════════════════════════╗");
+    Serial.println("║  BARE BONES ILI9341 TEST     ║");
+    Serial.println("╚═══════════════════════════════╝\n");
+
+    // Setup pins
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(TFT_DC, OUTPUT);
+    pinMode(TFT_RST, OUTPUT);
+    pinMode(TFT_BL, OUTPUT);
+
+    digitalWrite(TFT_CS, HIGH);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_BL, HIGH);  // Backlight ON
+
+    Serial.println("✓ Pins configured");
+
+    // Initialize SPI at slow speed
+    tftSpi = new SPIClass(HSPI);
+    tftSpi->begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TFT_CS);
+    tftSpi->setFrequency(4000000);  // 4MHz - very slow
+    tftSpi->setDataMode(SPI_MODE0);
+    tftSpi->setBitOrder(MSBFIRST);
+
+    Serial.println("✓ SPI initialized at 4MHz");
+
+    // Hardware reset - LONG pulses
+    Serial.println("\n→ Hardware reset...");
+    digitalWrite(TFT_RST, HIGH);
+    delay(20);
+    digitalWrite(TFT_RST, LOW);
+    delay(100);  // Long reset pulse
+    digitalWrite(TFT_RST, HIGH);
+    delay(300);  // Long recovery time
+
+    Serial.println("✓ Reset complete\n");
+
+    // Software reset
+    Serial.println("→ Software reset (0x01)...");
+    writeCommand(0x01);
+    delay(200);
+
+    // Display off
+    Serial.println("→ Display OFF (0x28)...");
+    writeCommand(0x28);
+    delay(20);
+
+    // Sleep out
+    Serial.println("→ Sleep OUT (0x11)...");
+    writeCommand(0x11);
+    delay(150);
+
+    // Pixel format: 16-bit color
+    Serial.println("→ Set pixel format (0x3A)...");
+    writeCommand(0x3A);
+    writeData(0x55);  // 16-bit/pixel
+    delay(10);
+
+    // Memory access control
+    Serial.println("→ Memory access control (0x36)...");
+    writeCommand(0x36);
+    writeData(0x48);  // MX, BGR
+    delay(10);
+
+    // Display on
+    Serial.println("→ Display ON (0x29)...");
+    writeCommand(0x29);
+    delay(50);
+
+    Serial.println("\n✓ Initialization complete!");
+    Serial.println("\n→ Drawing test pattern...\n");
+
+    // Set drawing window to full screen
+    writeCommand(0x2A);  // Column address
+    writeData16(0);      // Start
+    writeData16(239);    // End
+
+    writeCommand(0x2B);  // Row address
+    writeData16(0);      // Start
+    writeData16(319);    // End
+
+    writeCommand(0x2C);  // Memory write
+
+    // Draw colored stripes
+    Serial.println("  Red stripe...");
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    for(int i = 0; i < 240*80; i++) {
+        tftSpi->transfer16(0xF800);  // Red
+    }
+    digitalWrite(TFT_CS, HIGH);
+
+    Serial.println("  Green stripe...");
+    digitalWrite(TFT_CS, LOW);
+    for(int i = 0; i < 240*80; i++) {
+        tftSpi->transfer16(0x07E0);  // Green
+    }
+    digitalWrite(TFT_CS, HIGH);
+
+    Serial.println("  Blue stripe...");
+    digitalWrite(TFT_CS, LOW);
+    for(int i = 0; i < 240*80; i++) {
+        tftSpi->transfer16(0x001F);  // Blue
+    }
+    digitalWrite(TFT_CS, HIGH);
+
+    Serial.println("  Yellow stripe...");
+    digitalWrite(TFT_CS, LOW);
+    for(int i = 0; i < 240*80; i++) {
+        tftSpi->transfer16(0xFFE0);  // Yellow
+    }
+    digitalWrite(TFT_CS, HIGH);
+
+    Serial.println("\n✓ Test pattern drawn!");
+    Serial.println("\n╔═══════════════════════════════╗");
+    Serial.println("║  If still white:              ║");
+    Serial.println("║  1. Check wiring with meter   ║");
+    Serial.println("║  2. Try 5V instead of 3.3V    ║");
+    Serial.println("║  3. Display may be defective  ║");
+    Serial.println("╚═══════════════════════════════╝\n");
+}
+
+void loop() {
+    // Blink backlight every 2 seconds to show we're running
+    static unsigned long lastBlink = 0;
+    if (millis() - lastBlink > 2000) {
+        Serial.println("Heartbeat - system running...");
+        lastBlink = millis();
+    }
+}

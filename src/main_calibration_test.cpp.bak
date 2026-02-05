@@ -1,0 +1,545 @@
+/**
+ * DISPLAY + TOUCH CALIBRATION
+ * Calibrates touch screen and tests accuracy
+ */
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <math.h>
+
+// Display pins
+#define TFT_CS   15
+#define TFT_DC   2
+#define TFT_RST  4
+#define TFT_MOSI 11
+#define TFT_MISO 19
+#define TFT_SCLK 18
+#define TFT_BL   21
+
+// Touch pins (NEW - safe GPIOs)
+#define TOUCH_CS   14  // Was GPIO 8
+#define TOUCH_CLK  12  // Was GPIO 10
+#define TOUCH_MOSI 13  // Was GPIO 9
+#define TOUCH_MISO 39  // Unchanged
+#define TOUCH_IRQ  -1  // Not connected
+
+SPIClass *hspi = nullptr;      // Display SPI
+SPIClass *touchSpi = nullptr;  // Touch SPI (separate bus)
+XPT2046_Touchscreen *touch = nullptr;
+
+// Calibration data
+struct CalibrationData {
+    int xMin, xMax;
+    int yMin, yMax;
+} calibration;
+
+// Manual SPI commands
+void writeCommand(uint8_t cmd) {
+    digitalWrite(TFT_DC, LOW);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(cmd);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void writeData(uint8_t data) {
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(data);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void initDisplay() {
+    // Setup pins
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(TFT_DC, OUTPUT);
+    pinMode(TFT_RST, OUTPUT);
+    pinMode(TFT_BL, OUTPUT);
+
+    digitalWrite(TFT_CS, HIGH);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_BL, HIGH);  // Backlight ON
+
+    // Initialize HSPI
+    hspi = new SPIClass(HSPI);
+    hspi->begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TFT_CS);
+    hspi->setFrequency(4000000);  // 4MHz
+    hspi->setDataMode(SPI_MODE0);
+    hspi->setBitOrder(MSBFIRST);
+
+    // Hardware reset
+    digitalWrite(TFT_RST, HIGH);
+    delay(20);
+    digitalWrite(TFT_RST, LOW);
+    delay(100);
+    digitalWrite(TFT_RST, HIGH);
+    delay(300);
+
+    // ILI9341 init
+    writeCommand(0x01);  // Software reset
+    delay(200);
+
+    writeCommand(0x28);  // Display OFF
+    delay(20);
+
+    writeCommand(0x11);  // Sleep OUT
+    delay(150);
+
+    writeCommand(0x3A);  // Pixel format
+    writeData(0x55);     // 16-bit/pixel
+    delay(10);
+
+    writeCommand(0x36);  // Memory access control
+    writeData(0x28);     // MV, BGR (landscape)
+    delay(10);
+
+    writeCommand(0x29);  // Display ON
+    delay(50);
+}
+
+void fillScreen(uint16_t color) {
+    // Column address set (0-319)
+    writeCommand(0x2A);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(0);
+    hspi->transfer(0);
+    hspi->transfer(319 >> 8);
+    hspi->transfer(319 & 0xFF);
+    digitalWrite(TFT_CS, HIGH);
+
+    // Row address set (0-239)
+    writeCommand(0x2B);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(0);
+    hspi->transfer(0);
+    hspi->transfer(239 >> 8);
+    hspi->transfer(239 & 0xFF);
+    digitalWrite(TFT_CS, HIGH);
+
+    // Memory write
+    writeCommand(0x2C);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+
+    for(int i = 0; i < 320*240; i++) {
+        hspi->transfer16(color);
+    }
+
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void drawPixel(int x, int y, uint16_t color) {
+    // Column address set
+    writeCommand(0x2A);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(x >> 8);
+    hspi->transfer(x & 0xFF);
+    hspi->transfer(x >> 8);
+    hspi->transfer(x & 0xFF);
+    digitalWrite(TFT_CS, HIGH);
+
+    // Row address set
+    writeCommand(0x2B);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer(y >> 8);
+    hspi->transfer(y & 0xFF);
+    hspi->transfer(y >> 8);
+    hspi->transfer(y & 0xFF);
+    digitalWrite(TFT_CS, HIGH);
+
+    // Memory write
+    writeCommand(0x2C);
+    digitalWrite(TFT_DC, HIGH);
+    digitalWrite(TFT_CS, LOW);
+    hspi->transfer16(color);
+    digitalWrite(TFT_CS, HIGH);
+}
+
+void drawLine(int x0, int y0, int x1, int y1, uint16_t color) {
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+
+    while (true) {
+        drawPixel(x0, y0, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+    }
+}
+
+void drawCrosshair(int x, int y, uint16_t color) {
+    // Draw crosshair target
+    // Outer circle
+    for(int angle = 0; angle < 360; angle += 10) {
+        float rad = angle * 3.14159 / 180.0;
+        int px = x + 15 * cos(rad);
+        int py = y + 15 * sin(rad);
+        drawPixel(px, py, color);
+    }
+
+    // Inner lines
+    drawLine(x - 20, y, x - 5, y, color);
+    drawLine(x + 5, y, x + 20, y, color);
+    drawLine(x, y - 20, x, y - 5, color);
+    drawLine(x, y + 5, x, y + 20, color);
+
+    // Center dot
+    for(int dy = -2; dy <= 2; dy++) {
+        for(int dx = -2; dx <= 2; dx++) {
+            drawPixel(x + dx, y + dy, color);
+        }
+    }
+}
+
+// Simple 7-segment style digit patterns (5x7 pixels)
+const uint8_t digitPatterns[10][7] = {
+    {0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F}, // 0
+    {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x1F}, // 1
+    {0x1F, 0x01, 0x01, 0x1F, 0x10, 0x10, 0x1F}, // 2
+    {0x1F, 0x01, 0x01, 0x1F, 0x01, 0x01, 0x1F}, // 3
+    {0x11, 0x11, 0x11, 0x1F, 0x01, 0x01, 0x01}, // 4
+    {0x1F, 0x10, 0x10, 0x1F, 0x01, 0x01, 0x1F}, // 5
+    {0x1F, 0x10, 0x10, 0x1F, 0x11, 0x11, 0x1F}, // 6
+    {0x1F, 0x01, 0x01, 0x02, 0x04, 0x08, 0x10}, // 7
+    {0x1F, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x1F}, // 8
+    {0x1F, 0x11, 0x11, 0x1F, 0x01, 0x01, 0x1F}  // 9
+};
+
+void drawDigit(int digit, int x, int y, uint16_t color, int scale) {
+    if (digit < 0 || digit > 9) return;
+
+    for(int row = 0; row < 7; row++) {
+        uint8_t pattern = digitPatterns[digit][row];
+        for(int col = 0; col < 5; col++) {
+            if (pattern & (1 << (4 - col))) {
+                for(int sy = 0; sy < scale; sy++) {
+                    for(int sx = 0; sx < scale; sx++) {
+                        drawPixel(x + col*scale + sx, y + row*scale + sy, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void drawNumber(int number, int x, int y, uint16_t color, int scale) {
+    char buffer[10];
+    sprintf(buffer, "%d", number);
+    int len = strlen(buffer);
+
+    for(int i = 0; i < len; i++) {
+        if (buffer[i] >= '0' && buffer[i] <= '9') {
+            drawDigit(buffer[i] - '0', x + i * (6 * scale), y, color, scale);
+        } else if (buffer[i] == '-') {
+            // Draw minus sign
+            for(int px = 0; px < 5 * scale; px++) {
+                for(int py = 0; py < scale; py++) {
+                    drawPixel(x + i * (6 * scale) + px, y + 3 * scale + py, color);
+                }
+            }
+        }
+    }
+}
+
+void drawText(const char* text, int x, int y, uint16_t color) {
+    // Simple text - just draw colored blocks for labels
+    int len = strlen(text);
+    for(int i = 0; i < len; i++) {
+        for(int dy = 0; dy < 8; dy++) {
+            for(int dx = 0; dx < 5; dx++) {
+                drawPixel(x + i*6 + dx, y + dy, color);
+            }
+        }
+    }
+}
+
+TS_Point waitForTouch() {
+    // Wait for touch press
+    while(!touch->touched()) {
+        delay(10);
+    }
+
+    // Get touch point
+    TS_Point p = touch->getPoint();
+
+    // Wait for release
+    while(touch->touched()) {
+        delay(10);
+    }
+
+    delay(200);  // Debounce
+    return p;
+}
+
+void runCalibration() {
+    Serial.println("\n=== TOUCH CALIBRATION ===\n");
+
+    fillScreen(0x0000);  // Black
+
+    // Calibration points (screen coordinates)
+    struct CalPoint {
+        int screenX, screenY;
+        int rawX, rawY;
+    };
+
+    CalPoint points[5] = {
+        {20, 20, 0, 0},      // Top-left
+        {300, 20, 0, 0},     // Top-right
+        {300, 220, 0, 0},    // Bottom-right
+        {20, 220, 0, 0},     // Bottom-left
+        {160, 120, 0, 0}     // Center
+    };
+
+    const char* labels[] = {
+        "Top Left",
+        "Top Right",
+        "Bottom Right",
+        "Bottom Left",
+        "Center"
+    };
+
+    // Collect calibration points
+    for(int i = 0; i < 5; i++) {
+        fillScreen(0x0000);
+
+        // Draw instruction
+        drawText(labels[i], 100, 10, 0xFFFF);
+        drawText("Touch center of target", 40, 30, 0x07FF);
+
+        // Draw crosshair
+        drawCrosshair(points[i].screenX, points[i].screenY, 0xF800);
+
+        Serial.printf("Waiting for touch on %s (%d, %d)...\n",
+                     labels[i], points[i].screenX, points[i].screenY);
+
+        // Wait for touch
+        TS_Point p = waitForTouch();
+        points[i].rawX = p.x;
+        points[i].rawY = p.y;
+
+        Serial.printf("  Got: raw X=%d, Y=%d\n", p.x, p.y);
+
+        // Visual feedback - show raw values on screen
+        fillScreen(0x0000);
+
+        // Red bar for X value
+        for(int bx = 20; bx < 80; bx++) {
+            for(int by = 75; by < 90; by++) {
+                drawPixel(bx, by, 0xF800);  // Red
+            }
+        }
+        drawNumber(p.x, 100, 75, 0xFFFF, 2);
+
+        // Green bar for Y value
+        for(int bx = 20; bx < 80; bx++) {
+            for(int by = 105; by < 120; by++) {
+                drawPixel(bx, by, 0x07E0);  // Green
+            }
+        }
+        drawNumber(p.y, 100, 105, 0xFFFF, 2);
+
+        delay(6500);  // 6.5 seconds to read values
+    }
+
+    // Calculate calibration values
+    calibration.xMin = min(min(points[0].rawX, points[3].rawX), points[4].rawX);
+    calibration.xMax = max(max(points[1].rawX, points[2].rawX), points[4].rawX);
+    calibration.yMin = min(min(points[0].rawY, points[1].rawY), points[4].rawY);
+    calibration.yMax = max(max(points[2].rawY, points[3].rawY), points[4].rawY);
+
+    // Show results on screen with readable numbers
+    fillScreen(0x0000);
+
+    // Draw labels and values
+    drawText("XMIN", 20, 30, 0xFFE0);
+    drawNumber(calibration.xMin, 100, 25, 0xFFFF, 2);
+
+    drawText("XMAX", 20, 60, 0xFFE0);
+    drawNumber(calibration.xMax, 100, 55, 0xFFFF, 2);
+
+    drawText("YMIN", 20, 90, 0xFFE0);
+    drawNumber(calibration.yMin, 100, 85, 0xFFFF, 2);
+
+    drawText("YMAX", 20, 120, 0xFFE0);
+    drawNumber(calibration.yMax, 100, 115, 0xFFFF, 2);
+
+    drawText("Touch to continue", 50, 180, 0x07FF);
+
+    Serial.println("\n=== CALIBRATION RESULTS ===");
+    Serial.printf("X Min: %d\n", calibration.xMin);
+    Serial.printf("X Max: %d\n", calibration.xMax);
+    Serial.printf("Y Min: %d\n", calibration.yMin);
+    Serial.printf("Y Max: %d\n", calibration.yMax);
+    Serial.println("\nAdd these to config.h:");
+    Serial.printf("#define TOUCH_CAL_X_MIN %d\n", calibration.xMin);
+    Serial.printf("#define TOUCH_CAL_X_MAX %d\n", calibration.xMax);
+    Serial.printf("#define TOUCH_CAL_Y_MIN %d\n", calibration.yMin);
+    Serial.printf("#define TOUCH_CAL_Y_MAX %d\n", calibration.yMax);
+    Serial.println("===========================\n");
+
+    // Wait for touch to continue
+    waitForTouch();
+    fillScreen(0x0000);
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+
+    Serial.println("\n\n=== DISPLAY + TOUCH CALIBRATION ===\n");
+
+    // Initialize calibration with measured values (swapped for correct mapping)
+    calibration.xMin = 3525;  // Swapped
+    calibration.xMax = 429;   // Swapped
+    calibration.yMin = 3591;  // Swapped
+    calibration.yMax = 63;    // Swapped
+
+    // Initialize display
+    Serial.println("Initializing display...");
+    initDisplay();
+    Serial.println("Display initialized!");
+
+    // Fill screen red
+    Serial.println("Filling screen red...");
+    fillScreen(0xF800);  // Red
+    delay(1000);
+
+    // Fill screen green
+    Serial.println("Filling screen green...");
+    fillScreen(0x07E0);  // Green
+    delay(1000);
+
+    // Fill screen blue
+    Serial.println("Filling screen blue...");
+    fillScreen(0x001F);  // Blue
+    delay(1000);
+
+    // Black screen for touch test
+    Serial.println("Ready for touch test...");
+    fillScreen(0x0000);  // Black
+    delay(500);
+
+    // Draw yellow box to show we got here
+    Serial.println("Drawing yellow test box...");
+    for(int y = 10; y < 30; y++) {
+        for(int x = 10; x < 100; x++) {
+            drawPixel(x, y, 0xFFE0);  // Yellow
+        }
+    }
+    Serial.println("Yellow box drawn!");
+    delay(2000);
+
+    // Initialize touch on separate SPI bus (FSPI on ESP32-S3)
+    Serial.println("Initializing touch on new GPIO pins...");
+
+    // Setup touch SPI with new safe pins (using FSPI/SPI2 on ESP32-S3)
+    touchSpi = new SPIClass(FSPI);  // FSPI is available on ESP32-S3
+    touchSpi->begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+
+    Serial.println("Touch SPI bus initialized");
+
+    // Create touch object with custom SPI
+    touch = new XPT2046_Touchscreen(TOUCH_CS, TOUCH_IRQ);
+    touch->setRotation(1);  // Match display rotation
+
+    Serial.println("Calling touch->begin()...");
+    bool touchOK = touch->begin(*touchSpi);
+    Serial.println("touch->begin() returned!");
+
+    // Show touch status on screen
+    if (touchOK) {
+        // Green box = touch initialized
+        Serial.println("Touch OK - drawing green box");
+        for(int y = 40; y < 60; y++) {
+            for(int x = 10; x < 100; x++) {
+                drawPixel(x, y, 0x07E0);  // Green
+            }
+        }
+        Serial.println("Touch initialized successfully on new pins!");
+    } else {
+        // Red box = touch failed
+        Serial.println("Touch FAILED - drawing red box");
+        for(int y = 40; y < 60; y++) {
+            for(int x = 10; x < 100; x++) {
+                drawPixel(x, y, 0xF800);  // Red
+            }
+        }
+        Serial.println("Touch init FAILED - check wiring!");
+    }
+
+    Serial.println("\nTouch the screen - dots will appear\n");
+
+    // Run calibration if touch initialized successfully
+    if (touchOK) {
+        // SKIP CALIBRATION - use saved values
+        // Uncomment line below to re-run calibration:
+        // runCalibration();
+
+        // Show ready message
+        fillScreen(0x0000);
+
+        // Draw colored bar to indicate ready
+        for(int x = 0; x < 320; x++) {
+            for(int y = 0; y < 20; y++) {
+                drawPixel(x, y, 0x07E0);  // Green bar at top
+            }
+        }
+
+        delay(1000);
+        fillScreen(0x0000);
+    }
+}
+
+void loop() {
+    static unsigned long lastHeartbeat = 0;
+    static int touchCount = 0;
+
+    if (touch) {
+        bool isTouched = touch->touched();
+
+        if (isTouched) {
+            touchCount++;
+            TS_Point p = touch->getPoint();
+
+            Serial.printf("TOUCH DETECTED #%d: raw X=%d, Y=%d, Z=%d\n", touchCount, p.x, p.y, p.z);
+
+            // Map raw touch to screen coords using calibration
+            int x = map(p.x, calibration.xMin, calibration.xMax, 0, 319);
+            int y = map(p.y, calibration.yMin, calibration.yMax, 0, 239);
+
+            x = constrain(x, 0, 319);
+            y = constrain(y, 0, 239);
+
+            // Draw white dot
+            for(int dx = -2; dx <= 2; dx++) {
+                for(int dy = -2; dy <= 2; dy++) {
+                    int px = x + dx;
+                    int py = y + dy;
+                    if(px >= 0 && px < 320 && py >= 0 && py < 240) {
+                        drawPixel(px, py, 0xFFFF);
+                    }
+                }
+            }
+
+            Serial.printf("  -> Mapped to screen: X=%d, Y=%d (dot drawn)\n", x, y);
+
+            delay(50);  // Debounce
+        }
+    }
+
+    // Heartbeat every 5 seconds
+    if (millis() - lastHeartbeat >= 5000) {
+        Serial.println("Heartbeat - System alive, waiting for touch...");
+        lastHeartbeat = millis();
+    }
+
+    delay(10);
+}
